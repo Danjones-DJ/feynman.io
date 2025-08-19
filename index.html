@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Feynman.io — Speech to Text</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root { --bg:#121212; --card:#181818; --muted:#b3b3b3; --text:#fff; --accent:#1db954; --border:#2a2a2a; }
+      * { box-sizing: border-box; }
+      body { margin:0; background:#121212; color:var(--text); font-family:-apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+      .container { max-width: 900px; margin: 36px auto; padding: 0 20px; }
+      .header { display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; }
+      .title { font-size:24px; font-weight:700; }
+      .pill { padding:4px 10px; border-radius:999px; background:var(--accent); color:#000; font-weight:600; }
+      .card { background:var(--card); border:1px solid var(--border); border-radius:16px; padding:18px; box-shadow:0 10px 30px rgba(0,0,0,0.35); }
+      .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+      button { border:none; border-radius:999px; padding:12px 18px; font-weight:600; background:#2a2a2a; color:var(--text); cursor:pointer; }
+      button:hover { background:#303030; }
+      .primary { background:var(--accent); color:#000; }
+      .ghost { background:transparent; border:1px solid var(--border); }
+      .muted { color:var(--muted); }
+      .status { background:#0d0d0d; border:1px solid var(--border); border-radius:12px; padding:10px 12px; color:var(--muted); font-family:ui-monospace, Menlo, Monaco, Consolas, "Courier New", monospace; font-size:13px; }
+      textarea { width:100%; min-height:260px; resize:vertical; padding:14px; border-radius:12px; border:1px solid var(--border); background:#0d0d0d; color:var(--text); line-height:1.5; font-size:15px; }
+      input[type="text"], select {
+        padding:10px 12px; border-radius:10px; border:1px solid var(--border);
+        background:#0d0d0d; color:var(--text); width:100%;
+      }
+      .toolbar { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+      .spacer { flex:1 1 auto; }
+      .banner { background:#0d0d0d; border:1px dashed #4a4a4a; padding:8px 12px; border-radius:10px; color:#d6d6d6; }
+      label.switch { display:flex; align-items:center; gap:8px; }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <div class="title">Feynman.io — Speech to Text</div>
+        <span class="pill" id="micStatus">Idle</span>
+      </div>
+
+      <div class="card" style="margin-bottom:14px;">
+        <div class="row" style="margin-bottom:8px;">
+          <button id="record" class="primary">Start recording</button>
+          <button id="stoprecord" class="ghost" disabled>Stop</button>
+          <button id="cancel" class="ghost" disabled>Cancel</button>
+          <span class="muted">Server-first. Auto-fallback to browser if slow.</span>
+        </div>
+
+        <div class="row" style="margin-bottom:8px;">
+          <label class="switch">
+            <input id="forceBrowser" type="checkbox" />
+            <span>Force browser transcription now</span>
+          </label>
+          <select id="asrLang" style="max-width:220px;">
+            <option value="en-GB" selected>English (UK)</option>
+            <option value="en-US">English (US)</option>
+            <option value="en-AU">English (AU)</option>
+            <option value="en-CA">English (CA)</option>
+            <option value="en-IN">English (IN)</option>
+          </select>
+          <label class="switch">
+            <input id="autoFallback" type="checkbox" checked />
+            <span>Auto-fallback next time if slow</span>
+          </label>
+        </div>
+
+        <div class="row" style="margin-bottom:8px;">
+          <input id="context" type="text" placeholder="Optional context (e.g., calculus, transformers, proper names)">
+        </div>
+        <div class="row" style="margin-bottom:10px;">
+          <input id="terms" type="text" placeholder="Custom terms, comma or newline separated (e.g., Feynman, eigenvalue, backpropagation, UCL)">
+          <label class="switch">
+            <input id="autoCorrect" type="checkbox" />
+            <span>Auto-correct low-confidence terms</span>
+          </label>
+        </div>
+
+        <div class="status" id="status">Ready.</div>
+        <div class="banner" id="fallbackBanner" style="display:none; margin-top:8px;"></div>
+      </div>
+
+      <div class="card">
+        <div style="font-weight:600; margin-bottom:8px;">Transcript</div>
+        <textarea id="transcript" placeholder="Your transcription will appear here. You can edit it freely."></textarea>
+        <div class="toolbar">
+          <button id="cleanup">Clean up spacing & casing</button>
+          <button id="proofread">Proofread pass</button>
+          <div class="spacer"></div>
+          <button id="clear" class="ghost">Clear</button>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+
+      const btnRecord = $("record");
+      const btnStop = $("stoprecord");
+      const btnCancel = $("cancel");
+      const statusEl = $("status");
+      const micStatus = $("micStatus");
+      const transcriptEl = $("transcript");
+      const contextEl = $("context");
+      const termsEl = $("terms");
+      const autoCorrectEl = $("autoCorrect");
+      const forceBrowserEl = $("forceBrowser");
+      const asrLang = $("asrLang");
+      const autoFallbackEl = $("autoFallback");
+      const fallbackBanner = $("fallbackBanner");
+
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      const hasBrowserASR = !!SpeechRecognition;
+
+      // Persisted preference: if we previously fell back due to slowness
+      const PREF_KEY = "preferBrowserASR";
+      if (hasBrowserASR && localStorage.getItem(PREF_KEY) === "true") {
+        forceBrowserEl.checked = true;
+        fallbackBanner.style.display = "block";
+        fallbackBanner.textContent = "Using browser transcription due to prior slow server run. You can uncheck to try server again.";
+      }
+
+      let recognition = null;      // Web Speech instance
+      let mediaRecorder = null;    // Server recorder
+      let chunks = [];
+      let stream = null;
+      let canceled = false;
+      let recStartedAt = 0;
+
+      function setRecordingUI(active) {
+        micStatus.textContent = active ? "Recording" : "Idle";
+        btnRecord.disabled = active;
+        btnStop.disabled = !active;
+        btnCancel.disabled = !active;
+      }
+
+      function chooseMime() {
+        if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) return "audio/webm;codecs=opus";
+        if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported("audio/ogg;codecs=opus")) return "audio/ogg;codecs=opus";
+        return "";
+      }
+
+      // ---------- Browser ASR mode (fallback) ----------
+      function startBrowserASR() {
+        transcriptEl.value = "";
+        fallbackBanner.style.display = "none";
+
+        recognition = new SpeechRecognition();
+        recognition.lang = asrLang.value || "en-GB";
+        recognition.interimResults = true;
+        recognition.continuous = true;
+
+        let finalText = "";
+
+        recognition.onstart = () => {
+          statusEl.textContent = "Listening (browser)…";
+          setRecordingUI(true);
+        };
+
+        recognition.onresult = (e) => {
+          let interim = "";
+          for (let i = e.resultIndex; i < e.results.length; i++) {
+            const res = e.results[i];
+            if (res.isFinal) finalText += res[0].transcript;
+            else interim += res[0].transcript;
+          }
+          transcriptEl.value = (finalText + " " + interim).trim();
+        };
+
+        recognition.onerror = (e) => {
+          statusEl.textContent = "Browser speech error: " + e.error;
+        };
+
+        recognition.onend = () => {
+          setRecordingUI(false);
+        };
+
+        recognition.start();
+      }
+
+      function stopBrowserASR(cancel = false) {
+        try {
+          if (recognition) {
+            const onend = recognition.onend;
+            recognition.onend = () => {
+              setRecordingUI(false);
+              recognition = null;
+              if (!cancel && onend) onend();
+            };
+            recognition.stop();
+          }
+        } catch (_) {}
+      }
+
+      // ---------- Server (Whisper) mode (default) ----------
+      async function startServerRecording() {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+          });
+          const opts = {};
+          const m = chooseMime();
+          if (m) opts.mimeType = m;
+
+          chunks = [];
+          canceled = false;
+          mediaRecorder = new MediaRecorder(stream, opts);
+
+          mediaRecorder.onstart = () => {
+            recStartedAt = performance.now();
+            statusEl.textContent = "Recording (server)…";
+            setRecordingUI(true);
+          };
+
+          mediaRecorder.ondataavailable = (e) => {
+            if (e.data && e.data.size > 0) chunks.push(e.data);
+          };
+
+          mediaRecorder.onstop = async () => {
+            const localStream = stream;
+            stream = null;
+            if (localStream) localStream.getTracks().forEach(t => t.stop());
+
+            if (canceled) {
+              chunks = [];
+              statusEl.textContent = "Canceled.";
+              setRecordingUI(false);
+              return;
+            }
+
+            // Estimated audio length from wall clock (accurate enough for heuristics)
+            const audioSeconds = Math.max(1, Math.round((performance.now() - recStartedAt) / 1000));
+            statusEl.textContent = "Transcribing on server…";
+
+            const blob = new Blob(chunks, { type: m || "audio/webm" });
+            const fetchStart = performance.now();
+            try {
+              const form = new FormData();
+              form.append("audio", blob, "take.webm");
+              form.append("context", contextEl.value || "");
+              form.append("terms", (termsEl.value || ""));
+              form.append("auto_correct", document.getElementById("autoCorrect").checked ? "true" : "false");
+
+              const res = await fetch("/transcribe", { method: "POST", body: form });
+              const data = await res.json();
+              transcriptEl.value = data.text || "";
+              statusEl.textContent = data.text ? "Done." : "No audio decoded. Try again.";
+
+              // Heuristic: if server turnaround is slow relative to clip length, prefer browser next time.
+              const rtMs = performance.now() - fetchStart;
+              const secPerMin = (rtMs / 1000) / (audioSeconds / 60); // seconds of wait per minute of audio
+              const isLongClip = audioSeconds >= 120;                 // over 2 minutes
+              const isSlow = secPerMin > 20;                          // >20s wait per minute of audio
+
+              if (hasBrowserASR && autoFallbackEl.checked && (isSlow || isLongClip)) {
+                localStorage.setItem(PREF_KEY, "true");
+                forceBrowserEl.checked = true;
+                fallbackBanner.style.display = "block";
+                const reason = isLongClip ? "long clip" : "slow turnaround";
+                fallbackBanner.textContent = `Auto-fallback enabled for next recording due to ${reason}. Using browser transcription next time for speed.`;
+              } else if (hasBrowserASR && !isSlow && !isLongClip) {
+                localStorage.removeItem(PREF_KEY);
+                fallbackBanner.style.display = "none";
+              }
+
+            } catch (err) {
+              console.error(err);
+              statusEl.textContent = "Transcription error.";
+            } finally {
+              chunks = [];
+              setRecordingUI(false);
+            }
+          };
+
+          mediaRecorder.start(); // one full blob emitted on stop
+        } catch (err) {
+          console.error(err);
+          statusEl.textContent = "Mic access denied or unsupported.";
+          setRecordingUI(false);
+        }
+      }
+
+      // ---------- Buttons ----------
+      btnRecord.onclick = () => {
+        const useBrowserNow = hasBrowserASR && forceBrowserEl.checked;
+        if (useBrowserNow) startBrowserASR();
+        else startServerRecording();
+      };
+
+      btnStop.onclick = () => {
+        if (recognition) {
+          stopBrowserASR(false);
+          return;
+        }
+        if (mediaRecorder && mediaRecorder.state !== "inactive") {
+          mediaRecorder.stop();
+        }
+      };
+
+      btnCancel.onclick = () => {
+        if (recognition) {
+          stopBrowserASR(true);
+          statusEl.textContent = "Canceled.";
+          return;
+        }
+        canceled = true;
+        if (mediaRecorder && mediaRecorder.state !== "inactive") {
+          mediaRecorder.stop();
+        } else {
+          if (stream) stream.getTracks().forEach(t => t.stop());
+          stream = null;
+          statusEl.textContent = "Canceled.";
+          setRecordingUI(false);
+        }
+      };
+
+      // ---------- Text tools ----------
+      $("cleanup").onclick = () => {
+        let t = transcriptEl.value;
+        t = t.replace(/\s+/g, " ").trim();
+        t = t.replace(/([.!?])([^\s"')\]])/g, "$1 $2");
+        t = t.replace(/(^\s*[a-z])|([.!?]\s+[a-z])/g, (m) => m.toUpperCase());
+        transcriptEl.value = t;
+        statusEl.textContent = "Clean up applied.";
+      };
+
+      $("proofread").onclick = () => {
+        let t = transcriptEl.value;
+        t = t.replace(/\bi\b/g, "I");
+        t = t.replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
+        t = t.replace(/([!?.,;:])\1{1,}/g, "$1");
+        t = t.replace(/\s+([,.;:!?])/g, "$1");
+        t = t.replace(/([,.;:!?])(?!\s|$)/g, "$1 ");
+        t = t.replace(/\s{2,}/g, " ").trim();
+        transcriptEl.value = t;
+        statusEl.textContent = "Proofread pass applied.";
+      };
+
+      $("clear").onclick = () => {
+        transcriptEl.value = "";
+        statusEl.textContent = "Transcript cleared.";
+      };
+    </script>
+  </body>
+</html>
