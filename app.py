@@ -1,16 +1,13 @@
 # app.py
 from flask import Flask, request, jsonify
-from faster_whisper import WhisperModel
+import requests
 import io
 import av
 from rapidfuzz import process as rf_process, fuzz as rf_fuzz
 
 app = Flask(__name__, static_url_path="", static_folder="static")
 
-# Server-first: choose a bigger model but quantized for CPU.
-# Bump to "medium.en" if you accept slower CPU inference for more accuracy.
-MODEL_SIZE = "small.en"
-model = WhisperModel(MODEL_SIZE, compute_type="int8")
+
 
 @app.get("/")
 def index():
@@ -89,51 +86,22 @@ def transcribe():
     buf = io.BytesIO(raw)
     buf.seek(0)
 
+    # Example: Use OpenAI Whisper API (or another free/easy API)
+    # Replace this with your actual API endpoint and key if needed
+    api_url = "https://api.openai.com/v1/audio/transcriptions"
+    api_key = "YOUR_OPENAI_API_KEY"  # Replace with your key or use env var
+    files = {"file": (f.filename, buf, f.mimetype)}
+    data = {"model": "whisper-1", "language": "en"}
+    headers = {"Authorization": f"Bearer {api_key}"}
     try:
-        segments, info = model.transcribe(
-            buf,
-            language="en",
-            initial_prompt=build_initial_prompt(terms, context),
-            vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=300),
-            beam_size=5,
-            patience=0.1,
-            temperature=0.0,  # deterministic
-            condition_on_previous_text=True,
-            word_timestamps=True
-        )
-    except av.error.InvalidDataError:
-        return jsonify({"text": "", "avg_logprob": None})
-    except Exception:
-        return jsonify({"text": "", "avg_logprob": None})
-
-    segs = list(segments)
-
-    # coarse segment-level confidence
-    valid = [s.avg_logprob for s in segs if getattr(s, "avg_logprob", None) is not None]
-    avg_logprob = (sum(valid) / len(valid)) if valid else None
-
-    # tokenize with per-word probs (if available)
-    tokens = []
-    for s in segs:
-        if s.words:
-            for w in s.words:
-                prob = getattr(w, "probability", None)
-                if prob is None and getattr(s, "avg_logprob", None) is not None:
-                    lp = s.avg_logprob  # ~ [-1,0]
-                    prob = max(0.0, min(1.0, 1.0 + lp))
-                if prob is None:
-                    prob = 1.0
-                tokens.append({"word": w.word, "prob": float(prob)})
-        else:
-            for w in s.text.split():
-                tokens.append({"word": w, "prob": 1.0})
-
-    if auto and terms:
-        tokens = autocorrect_tokens(tokens, terms)
-
-    text = stitch_tokens(tokens) if tokens else "".join(s.text for s in segs).strip()
-    return jsonify({"text": text, "avg_logprob": avg_logprob})
+        response = requests.post(api_url, files=files, data=data, headers=headers)
+        response.raise_for_status()
+        result = response.json()
+        text = result.get("text", "")
+        avg_logprob = None  # Not available from API
+        return jsonify({"text": text, "avg_logprob": avg_logprob})
+    except Exception as e:
+        return jsonify({"text": "", "avg_logprob": None, "error": str(e)})
     
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
