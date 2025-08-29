@@ -1,0 +1,5 @@
+flask
+gunicorn
+faster-whisper
+av
+rapidfuzz
